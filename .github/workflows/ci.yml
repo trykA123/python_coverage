@@ -6,15 +6,13 @@ name: tests
 
 on:
   push:
-    branches: ["master"]
+    branches: "**"
   pull_request:
-    branches: ["master"]
+    branches: "**"
 
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    outputs:
-      wheel-distribution: ${{ steps.wheel-distribution.outputs.path }}
     steps:
       - uses: actions/checkout@v3
         with: { fetch-depth: 0 } # deep clone for setuptools-scm
@@ -26,73 +24,51 @@ jobs:
           pipx run --python '${{ steps.setup-python.outputs.python-path }}'
           tox -e clean,build
 
-      - name: Code Coverage Report
-        uses: irongut/CodeCoverageSummary@v1.3.0
+      # - name: Code Coverage Report
+      #   uses: irongut/CodeCoverageSummary@v1.3.0
 
+      #   with:
+      #     filename: coverage.xml
+      #     badge: true
+      #     fail_below_min: true
+      #     format: markdown
+      #     hide_branch_rate: false
+      #     hide_complexity: true
+      #     indicators: true
+      #     output: both
+      #     thresholds: "40 80"
+
+      # - name: Add Coverage PR Comment
+      #   uses: marocchino/sticky-pull-request-comment@v2
+      #   if: always()
+      #   with:
+      #     recreate: true
+      #     path: code-coverage-results.md
+
+      - uses: actions/upload-artifact@v3
         with:
-          filename: coverage.xml
-          badge: true
-          fail_below_min: true
-          format: markdown
-          hide_branch_rate: false
-          hide_complexity: true
-          indicators: true
-          output: both
-          thresholds: "40 80"
+          name: coverage-report
+          path: coverage.xml
 
-      - name: Add Coverage PR Comment
-        uses: marocchino/sticky-pull-request-comment@v2
-        if: always()
+  upload_coverage_to_influxdb:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download coverage report
+        uses: actions/download-artifact@v3
         with:
-          recreate: true
-          path: code-coverage-results.md
+          name: coverage-report
 
-  # test:
-  #   needs: prepare
-  #   strategy:
-  #     matrix:
-  #       python:
-  #         - "3.7" # oldest Python supported by PSF
-  #         - "3.11" # newest Python that is stable
-  #       platform:
-  #         - ubuntu-latest
-  #         - macos-latest
-  #         - windows-latest
-  #   runs-on: ${{ matrix.platform }}
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     - uses: actions/setup-python@v4
-  #       id: setup-python
-  #       with:
-  #         python-version: ${{ matrix.python }}
-  #     - name: Retrieve pre-built distribution files
-  #       uses: actions/download-artifact@v3
-  #       with: { name: python-distribution-files, path: dist/ }
-  #     - name: Run tests
-  #       run: >-
-  #         pipx run --python '${{ steps.setup-python.outputs.python-path }}'
-  #         tox --installpkg '${{ needs.prepare.outputs.wheel-distribution }}'
-  #         -- -rFEx --durations 10 --color yes  # pytest args
-  #     - name: Generate coverage report
-  #       run: pipx run coverage lcov -o coverage.lcov
-  #     - name: Upload partial coverage report
-  #       uses: coverallsapp/github-action@master
-  #       with:
-  #         path-to-lcov: coverage.lcov
-  #         github-token: ${{ secrets.GITHUB_TOKEN }}
-  #         flag-name: ${{ matrix.platform }} - py${{ matrix.python }}
-  #         parallel: true
+      - name: Extract coverage percentage
+        id: get_coverage
+        run: |
+          LINE_RATE=$(grep -oP 'line-rate="\K[^"]*' coverage.xml | head -1)
+          COVERAGE=$(echo "$LINE_RATE" | awk '{printf "%.2f", $1 * 100}')
+          echo "Coverage: $COVERAGE%"
+          echo "::set-output name=coverage::$COVERAGE"
 
-  # finalize:
-  #   needs: test
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Finalize coverage report
-  #       uses: coverallsapp/github-action@master
-  #       with:
-  #         github-token: ${{ secrets.GITHUB_TOKEN }}
-  #         parallel-finished: true
-
-  # publish:
-  #   runs-on: ubuntu-latest
-  #   steps:
+      - name: Upload coverage to InfluxDB
+        run: |
+          curl -X POST "${{ secrets.INFLUXDB_URL }}/api/v2/write?org=${{ secrets.INFLUXDB_ORG }}&bucket=${{ secrets.INFLUXDB_BUCKET }}&precision=s" \
+          -H "Authorization: Token ${{ secrets.INFLUXDB_TOKEN }}" \
+          --data-raw "rust_code_coverage,repository=${GITHUB_REPOSITORY},branch=${{ github.ref_name }} coverage=${{ steps.get_coverage.outputs.coverage }}"
